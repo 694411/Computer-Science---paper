@@ -7,8 +7,8 @@ The code is divided in 8 parts:
   - Binary Vectors (constructing the binary vectors for each product)
   - Min-Hashing (constructing the signature matrix)
   - Locality-Sensitive Hashing (identifying candidate duplicate pairs)
-  - Bootstrapping LSH (evaluation pof LSH)
-  - Clustering (using agglomerative hierarchical clustering)
-  - Bootstrapping clustering (evaluation of hierarchical clustering)
+  - Jaccard Similarity
+  - Bootstrapping training 
+  - Bootstrapping testing
 
-The code is provided with a lot of comments, making all steps as clear as possible.
+The code is provided with a lot of comments, making all steps as clear as possible. There is no need to switch between documents, all code is provided in one file.
