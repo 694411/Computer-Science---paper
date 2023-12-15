@@ -1,0 +1,638 @@
+%reset -f
+
+import json
+import pandas as pd
+from IPython.display import display
+import re
+import numpy as np
+import random
+import matplotlib.pyplot as plt
+import hashlib
+from sklearn.metrics import f1_score
+from sklearn.metrics.pairwise import pairwise_distances
+from scipy.cluster.hierarchy import linkage
+import itertools
+
+
+### LOADING THE DATA AND DATA CLEANING ###
+
+# We open and read the JSON-file and convert to list-type.
+file_path = 'C:/Users/maaik/Documents/Business analytics and quantitative marketing/Blok 2/Computer Science for Business Analytics/Paper/TVs-all-merged.json'
+with open(file_path, 'r') as json_file:
+    data = json.load(json_file)
+
+# Note that 'data' consists of 1262 items. However, it was given that we
+# have approximately 1600 items. This is strange. If we take a closer look, we
+# see that some keys from 'data' exist of two or more items. We have to
+# flatten the data in order to get all items seperately:  
+flattened_data = {}
+for key, value in data.items():
+    # We check if the value is a list and conists of multiple lists.
+    if isinstance(value, list) and len(value) > 1:
+        # If yes, then we duplicate the key for each list contained in the key.
+        for i, sublist in enumerate(value, 1):
+            new_key = f"{key}_{i}"
+            flattened_data[new_key] = [sublist]
+    else:
+        # If no, so the key has one list, then keep it as is.
+        flattened_data[key] = [value]
+# Now flattened_data contains 1624 items.
+# To extract all modelIDs that occur more than once (the duplicates):
+duplicate_modelIDs = [key for key, value in data.items() if len(value) > 1]
+data = flattened_data
+
+# Let's start with cleaning the data. First change upper case characters to 
+# lower case characters. Than apply many more small adjustments:
+def data_cleaning(x):
+    if isinstance(x, dict):
+        return {key: data_cleaning(value) if isinstance(value, (dict, list)) 
+                else what_do_we_do(value) for key, value in x.items()}
+    elif isinstance(x, list):
+        return [data_cleaning(item) for item in x]
+    elif isinstance(x, str):
+        return what_do_we_do(x)
+    else:
+        return x
+    
+# All things that we want to change:
+def what_do_we_do(value):
+    value_lowercase = value.lower()
+    value_inches = value_lowercase.replace("inches", "inch")
+    value_inches1 = value_inches.replace('"', 'inch')
+    value_inches2 = value_inches1.replace("-inch", "inch")
+    value_inches3 = value_inches2.replace("”", "inch")
+    value_inches4 = value_inches3.replace("'", "inch")
+    value_inches5 = value_inches4.replace("inchdiagonal", "inch")
+    value_inches6 = value_inches5.replace(" inch", "inch")
+    value_hertz = value_inches6.replace("hertz", "hz")
+    value_hertz1 = value_hertz.replace("-hz", "hz")
+    value_hertz2 = value_hertz1.replace(" hz", "hz")
+    value_lbs = value_hertz2.replace("lbs.", "lb")
+    value_lbs1 = value_lbs.replace("lb.", "lb")
+    value_lbs2 = value_lbs1.replace("-lb", "lb")
+    value_lbs3 = value_lbs2.replace(" lb", "lb")
+    value_no_x99 = value_lbs3.replace("\x99", " ")
+    value_no_and = value_no_x99.replace("and", " ")
+    value_no_or = value_no_and.replace("or", " ")
+    value_no_andsign = value_no_or.replace("&", " ")
+    value_no_bar = value_no_andsign.replace(" - ", " ")
+    value_no_brackets1 = value_no_bar.replace("(", " ")
+    value_no_brackets2 = value_no_brackets1.replace(")", " ")
+    # value_x = value_no_brackets2.replace(" x ", "x")
+    
+    return value_no_brackets2
+    
+data_cleaned = data_cleaning(data)
+
+
+### MODEL WORDS ###
+
+# In order to find model words from values, we have to convert our data to
+# a list so that we can extract the items.
+data_cleaned_items = list(data_cleaned.items())
+indexed_data = list(enumerate(data_cleaned_items))
+# We can easily extract the index (which comes in handy later on): 
+# For first product, we have indexed_data[0][0], for tenth, indexed_data[9][0]
+
+# We want to extract the title for each product. Note that this is a bit tricky, 
+# since the way of extracting differs per product. For example for the first 
+# product, we have that the title be extracted by the following code:
+title_first_item = data_cleaned_items[0][1][0][0]['title']
+# However, we encounter a problem as for some items, we have that this gives an 
+# error due to the fact that there are differences in the number of the square
+# brackets. For example for the tenth product, we should instead have:
+title_tenth_item = data_cleaned_items[9][1][0]['title']
+# So when extracting the titles, we keep this in mind. Furthermore, we extract
+# the features in featuresMap.    
+title_values = []
+key_values = []
+for item in data_cleaned_items:
+    # Check if item[1] is a list or a dictionary
+    # List if we use item[1][0][0]['featureMap']
+    if isinstance(item[1][0], list):
+        title_value = item[1][0][0]['title']
+        key_value = item[1][0][0]['featuresMap'].values()
+    # Dictionary if we only use item[1][0]['title']
+    elif isinstance(item[1][0], dict):
+        title_value = item[1][0]['title']
+        key_value = item[1][0]['featuresMap'].values()
+    title_values.append(title_value)  
+    key_values.append(key_value)
+
+# We obtained all key values but they are still in seperate lists. We merge the 
+# two lists so that for each product, we have all key values.
+all_key_values = []
+for item1, item2 in zip(title_values, key_values):
+    combined_row = [item1] + list(item2)
+    all_key_values.append(combined_row)
+
+# Now we want to extract the model words for each product.
+# We do this by creating a list, since we want to keep the duplicates. 
+# Function to extract model words:
+def extract_model_words(key_values):
+    # We want all key values without the ' ' so that it becomes one 'sentence'.
+    key_values_string = ' '.join(map(str, key_values))
+    # We have the following pattern for the model words.
+    pattern = re.compile(r"(?:[a-zA-Z0-9]*\d+(?:\.\d+)?[a-zA-Z0-9]*[^0-9, ]+[a-zA-Z0-9]*|\
+                    [a-zA-Z0-9]*[^0-9, ]+\d+(?:\.\d+)?[a-zA-Z0-9]*|\
+                    [0-9]+[a-zA-Z0-9]*[^0-9, ]+[a-zA-Z0-9]*)")
+    return set(pattern.findall(key_values_string))
+
+# List containing the model words for each product:
+model_words_list = []
+for key_values in all_key_values:
+    model_words = extract_model_words(key_values)
+    model_words_list.append(model_words)
+
+# Then the list with all model words (also when they occur more than once):
+all_model_words = []
+for key_values in all_key_values:
+    model_words = extract_model_words(key_values)
+    all_model_words.extend(model_words)
+    
+# Remove duplicate model words, so we end up with all different model words
+unique_model_words = set(list(all_model_words))
+# len(unique_model_words) => 4564 model words
+
+
+### BINARY VECTORS ###
+
+# Create empty list where we will store all the binary vectors.
+binary_vectors = []
+
+# Then we use a for loop to set entry of binary vector equal to one if a model 
+# word occurs in a product.
+for product_model_words in model_words_list:
+    binary_vector = [0] * len(unique_model_words)
+    for index, word in enumerate(unique_model_words):
+        if word in product_model_words:
+            binary_vector[index] = 1
+    binary_vectors.append(binary_vector)
+# So the binary vector for the third product equals binary_vectors[2].
+
+# Now we want to store all binary vectors in a matrix, where each column is the
+# binary vector of a product. The first column corresponding to the first 
+# product. The first row corresponding to the first model word.
+binary_matrix_not_transposed = np.array(binary_vectors)
+binary_matrix = binary_matrix_not_transposed.T
+
+
+### MIN-HASHING ###
+
+# Number of rows and number of columns in binary vector matrix:
+n_rows, n_columns = binary_matrix.shape  
+
+# We are going to construct the signature matrix. Later on, we will have to
+# divide the number of rows by a number of bands. Therefore, it is a good idea
+# to let the number of rows of the signature matrix to be a round, easy number.
+# For example 2400. Number of rows is 4564, so if we want to obtain 2400 rows 
+# in the signature matrix, we should multiply 4564 by 1/(4564/2400), which 
+# approximately equals 53%.
+    
+k = int(n_rows * (1/(4564/2400)))   # number of rows in signature matrix
+n_hash_functions = k                # number of hash functions (= k)
+
+# Create the matrix that eventually will be the signature matrix:
+signature_matrix = np.full((n_hash_functions, n_columns), np.inf)
+
+# We need random prime number for our hash functions. We write a function to
+# create random prime numbers greater than the length of the signature matrix:
+def is_prime(num):
+    if num < 2:
+        return False
+    for i in range(2, int(num**0.5) + 1):
+        if num % i == 0:
+            return False
+    return True
+
+def generate_random_prime(minimum):
+    candidate = random.randint(minimum + 1, minimum + 100000)
+    while not is_prime(candidate):
+        candidate = random.randint(minimum + 1, minimum + 100000)
+    return candidate
+minimum_value_for_prime = k
+
+# Then we construct the hash functions and obtain the signatures:
+for i in range(n_hash_functions):
+    prime = generate_random_prime(minimum_value_for_prime)
+    a = np.random.randint(1, prime) 
+    b = np.random.randint(0, prime) 
+       
+    for column_index in range(n_columns):
+        hash_value = np.inf
+        
+        for row_index in range(n_rows):
+            if binary_matrix[row_index, column_index] == 1:
+                # Update signature matrix
+                hash_value = min(hash_value, (a + b * row_index) % prime)
+                
+        signature_matrix[i, column_index] = hash_value
+
+# Note that all elements are now of the form x., so 80., 67., etc. Remove dots:
+signature_matrix = signature_matrix.astype(int)
+
+# Save the signature matrix so that you can always use it without running the 
+# for loop (which takes some time).
+matrix_path = 'C:/Users/maaik/Documents/Business analytics and quantitative marketing/Blok 2/Computer Science for Business Analytics/Paper/matrix2400.npy'        
+# np.save(matrix_path, signature_matrix)
+signature_matrix_saved = np.load(matrix_path)
+# signature_matrix = signature_matrix_saved
+# The signature matrix contains numerical values that represents the hash 
+# signatures for each product. Each row corresponds to another hash function. 
+# Similar products are likely to have similar hash signatures.
+n_rows_signature = signature_matrix.shape[0]
+
+
+### LOCALITY-SENSITIVE HASHING ###
+
+# LHS divides signature_matrix into b bands, each band with r rows.
+# n = r*b must hold.
+
+# Eventually, LSH will produce candidate pairs. We will compare those candidate
+# pairs with the real duplicates. We will first find the real duplicates and 
+# after that, we will extract candidate pairs for varying b and r.
+    
+# Note that the model IDs of duplicates are of the form 'ModelID_1' and 
+# 'ModelID_2' for example. We just want this as 'ModelID' and then twice:
+model_IDs_wrong_notation = list(dict(data_cleaned_items))
+all_model_IDs = []
+for model_ID in model_IDs_wrong_notation:
+    if "_" in model_ID:
+        ID = model_ID.split("_")[0]  # Get the part before the underscore
+    else:
+        ID = model_ID
+    all_model_IDs.append(ID)
+
+# Recall that all duplicate model IDs are in duplicate_modelIDs. So now, we
+# want to check which products are real duplicates:
+real_duplicates = {}
+for index, model_ID in enumerate(all_model_IDs):
+    if model_ID in duplicate_modelIDs:
+        # If the model_id is in duplicate_modelIDs, add its index to the list
+        if model_ID in real_duplicates:
+            real_duplicates[model_ID].append(index)
+        else:
+            real_duplicates[model_ID] = [index]
+
+# real_duplicates denotes for each model ID, which products share this model ID
+# We also want to see just the duplicate pairs:
+duplicate_pairs = []
+for model_id, indexes in real_duplicates.items():
+    pairs = [(indexes[i], indexes[j]) for i in range(len(indexes)) for j in range(i + 1, len(indexes))]
+    duplicate_pairs.extend(pairs)
+
+# Then we construct function for LSH:
+def LSH_function(n_bands, n_band_rows, selected_products):
+    # Empty bucket that will later contain all buckets for each band:
+    buckets = {} 
+    
+    for band_index in range(n_bands):
+        # We define the hash function as follows:
+        def hash_band(vector):
+            return ''.join(map(str, vector))
+        
+        # We extract the band from the signature matrix:
+        band_matrix = signature_matrix[band_index * n_band_rows : (band_index + 1) * n_band_rows, :]
+
+        # For the current band, we need an empty bucket-dictionary to store 
+        # the products hashed to the same bucket:
+        band_buckets = {}
+
+        # We iterate through each product (column) in the signature matrix
+        for product_index in selected_products:
+            # For the product, we extract the signature vector in the current 
+            # band and we hash it to a bucket:
+            signature_vector = band_matrix[:, product_index]
+            hashed_value = hash_band(signature_vector)
+            if hashed_value not in band_buckets:
+                band_buckets[hashed_value] = [product_index]
+            else:
+                band_buckets[hashed_value].append(product_index)
+
+        # For the current band, we store all buckets containing the candidate 
+        # duplicates in the overall buckets dictionary:
+        buckets[band_index] = band_buckets
+        
+    # Now we obtained a dictionary that for each band shows us the buckets and
+    # which products were hashed to which buckets. Now we want to extract all
+    # buckets that contain more than one product:
+    candidate_pairs = {}
+    for band, band_data in buckets.items():
+        for bucket, products in band_data.items():
+            if len(products) > 1:
+                # If the bucket has more than one product, add to the dictionary
+                if bucket not in candidate_pairs:
+                    candidate_pairs[bucket] = []
+                candidate_pairs[bucket].extend(products)
+    
+    # We end up with a dictionary containing all candidate pairs!
+    return(candidate_pairs)
+
+# We construct a function that gives us all unique candidate pairs produced by
+# LSH. The length of the output equals the number of comparisons we need to do.
+def unique_pairs_function(pairs):
+    # We create an empty set in which we will store the unique candidate pairs:
+    unique_pairs = set()
+    # For each bucket, we extract the candidate pairs
+    for bucket, products in pairs.items():
+        for i in range(len(products)):
+            for j in range(i + 1, len(products)):
+                unique_pairs.add(tuple(sorted([products[i], products[j]])))
+    return(unique_pairs)
+
+
+#### JACCARD CLUSTERING ####
+
+# After obtaining candidate pairs in the LSH method, we will use Jaccard
+# clustering.
+
+# To calculate the Jaccard similarity between two binary vectors:
+def calculate_jaccard_similarity(BV1, BV2):
+    intersection = np.sum(np.logical_and(BV1, BV2))
+    union = np.sum(np.logical_or(BV1, BV2))
+    # If we have division by zero, we do:
+    jaccard_similarity = intersection / union if union != 0 else 0
+    return jaccard_similarity
+
+# Then the candidate pairs proposed by Jaccard:
+def perform_jaccard_similarity(candidate_pairs, threshold):
+    jaccard_candidate_pairs = []
+    for pair in candidate_pairs:
+        # For a given pair, the corresponding binary vectors are:
+        BV1 = binary_matrix[:, pair[0]]
+        BV2 = binary_matrix[:, pair[1]]
+        # Then the Jaccard similarity between the two products:
+        jaccard_similarity = calculate_jaccard_similarity(BV1, BV2)
+        # If Jaccard similarity >= the threshold, then we consider candidate pair!
+        if jaccard_similarity >= threshold:
+            jaccard_candidate_pairs.append(pair)
+    return jaccard_candidate_pairs
+
+# Eventually, we will evaluate the F1 scores after clustering. We write a function
+# so that is easier to use it in the bootstrap later on:
+def calculate_f1_score(true_duplicates, candidate_pairs, threshold):
+    candidate_set = set(candidate_pairs)
+    # We check whether a pair in the candidate set is a real duplicate:
+    true_labels = [1 if pair in candidate_set else 0 for pair in true_duplicates]
+    # Then for the true duplicates, we have only "true positives"
+    labels_true_duplicates = [1] * len(true_duplicates)
+    # Calculate F1 score
+    f1 = f1_score(labels_true_duplicates, true_labels)
+    return f1
+# Very important! For the F1 score, we always compare with the true duplicates
+# that are present, not with the true duplicates in the candidates! So this
+# needs to be kept in mind for labels_true_duplicates.
+
+# Then a function to find the optimal threshold for each b and r combination:
+def find_optimal_threshold(b, r, candidate_pairs, true_duplicates):
+    # Tune over different threshold values:
+    thresholds = [0.2, 0.4, 0.6, 0.8]  
+    max_f1_score = 0
+    optimal_threshold = 0
+    for threshold in thresholds:
+        # For all candidate pairs, compute Jaccard similarity pairs. We obtain
+        # the candidate pairs:
+        jaccard_candidate_pairs = perform_jaccard_similarity(candidate_pairs, threshold)
+        # Then calculate the F1 score based on the true duplicates present in the sample:
+        f1 = calculate_f1_score(true_duplicates, jaccard_candidate_pairs, threshold)
+        # We want to find optimal threshold, so if F1 score is higher than 
+        # current F1, adjust F1 and optimal threshold!
+        if f1 > max_f1_score:
+            max_f1_score = f1
+            optimal_threshold = threshold
+    return optimal_threshold, max_f1_score
+
+
+
+#### BOOTSTRAPPING ####
+
+# To evaluate LSH and Jaccard clustering, we perform 5 bootstraps. In each 
+# bootstrap, we generate a sample. For all different b and r combinations, 
+# the candidate pairs are produced by LSH. Then, for each b and r combination
+# and looped over all threshold values, we produce the Jaccard candidate pairs.
+# Then for the F1 score and optimal threshold are stored for each b and r 
+# combination.
+
+# Set up for bootstrap:
+n_bootstraps = 5
+sample_size = len(indexed_data)
+
+# Initialize bootstraps and oobs
+bootstraps = []
+oobs = []
+
+for bs in range(n_bootstraps):
+    # Bootstrap indices
+    bootstrap_indices = np.random.choice(range(sample_size), size=sample_size, replace=True)
+    bootstrap_sample = [indexed_data[i] for i in bootstrap_indices]
+
+    # Out-of-bag indices
+    oob_indices = np.setdiff1d(range(sample_size), bootstrap_indices)
+    oob_sample = [indexed_data[i] for i in oob_indices]
+
+    # Append to lists
+    bootstraps.append(bootstrap_sample)
+    oobs.append(oob_sample)
+    
+# Create empty vectors in which we will store the fractions of comparisons,
+# the PC values, the PQ values, the F1 scores and the optimal thresholds:
+FC = [[] for _ in range(5)]
+PC = [[] for _ in range(5)]
+PQ = [[] for _ in range(5)]
+F1 = [[] for _ in range(5)]
+TH = [[] for _ in range(5)]
+
+for bs in range(n_bootstraps):    
+    current_FC = []
+    current_PC = []  
+    current_PQ = []
+    current_F1 = []
+    current_TH = []
+
+    bootstrap_sample = bootstraps[bs]
+   
+    # We created a list with all the indexes of the products that are in the sample:
+    selected_products = []
+    for product in bootstrap_sample:
+        selected_products.append(product[0])
+    selected_products = list(set(sorted(selected_products)))
+      
+    n_total_comparisons = (len(selected_products)*(len(selected_products)-1))/2
+    
+    # Calculate the number of real duplicates in the sample:
+    n_real_duplicates = 0
+    duplicates_here = [0]
+    for pair in duplicate_pairs:
+        if pair[0] in selected_products and pair[1] in selected_products:
+            n_real_duplicates += 1
+            duplicates_here.append(pair)
+        
+    for n_bands in range(1, n_rows_signature + 1):
+        if n_rows_signature % n_bands == 0:  # Ensures b divides total_rows evenly
+            n_band_rows = n_rows_signature // n_bands  # Calculate the corresponding r value
+            print(f"Testing combination: n_bands = {n_bands}, n_band_rows = {n_band_rows}")
+            
+            candidates = LSH_function(n_bands, n_band_rows, selected_products)
+            unique_candidates = unique_pairs_function(candidates)
+                
+            # Find optimal threshold and F1 score for this b and r combination
+            optimal_threshold, max_f1_score = find_optimal_threshold(n_bands, n_band_rows, unique_candidates, duplicates_here)
+            # Store the results (b, r, threshold, F1) for this combination
+            print(f"Bootstrap {bs + 1}: b={n_bands}, r={n_band_rows}, Threshold={optimal_threshold}, F1={max_f1_score}")
+            
+            n_candidate_comparisons = len(unique_pairs_function(candidates))
+            
+            true_positives = 0
+            for pair in unique_candidates:
+                # Check if the pair is in real_duplicates
+                if pair in duplicate_pairs:
+                    true_positives += 1
+            
+            current_PC.append(true_positives / n_real_duplicates)
+            current_PQ.append(true_positives / n_candidate_comparisons)
+            current_FC.append(n_candidate_comparisons / n_total_comparisons)
+            current_F1.append(max_f1_score)
+            current_TH.append(optimal_threshold)
+            
+    PC[bs] = current_PC
+    PQ[bs] = current_PQ
+    FC[bs] = current_FC
+    F1[bs] = current_F1
+    TH[bs] = current_TH
+
+
+FC_sum = [sum(FC) for FC in zip(FC[0], FC[1], FC[2], FC[3], FC[4])]
+FC_average = [FC/5 for FC in FC_sum]
+
+PC_sum = [sum(x) for x in zip(PC[0], PC[1], PC[2], PC[3], PC[4])]
+PC_average = [x/5 for x in PC_sum]
+
+PQ_sum = [sum(x) for x in zip(PQ[0], PQ[1], PQ[2], PQ[3], PQ[4])]
+PQ_average = [x/5 for x in PQ_sum]
+
+F1 = [sum(x) for x in zip(F1[0], F1[1], F1[2], F1[3], F1[4])]
+F1_average = [x/5 for x in F1]
+
+
+plt.figure(figsize=(10, 6))
+plt.plot(FC_average, PC_average, linestyle='-', color='black', label='PC vs. Fraction of Comparisons')
+plt.xlabel('Fraction of Comparisons')
+plt.ylabel('PC')
+plt.legend()
+plt.show()
+
+plt.figure(figsize=(10, 6))
+plt.plot(FC_average, PQ_average, linestyle='-', color='black', label='PQ vs. Fraction of Comparisons')
+plt.xlabel('Fraction of Comparisons')
+plt.ylabel('PQ')
+plt.legend()
+plt.show()
+
+plt.figure(figsize=(10, 6))
+plt.plot(FC_average, F1_average, linestyle='-', color='black', label='F1 vs. Fraction of Comparisons')
+plt.xlabel('Fraction of Comparisons')
+plt.ylabel('F1')
+plt.legend()
+plt.show()
+
+
+
+#### TEST DATA (OUT-OF-BAG SAMPLE) ####
+
+# Similar approach for the out-of-bag sample:
+
+FC = [[] for _ in range(n_bootstraps)]
+PC = [[] for _ in range(n_bootstraps)]
+PQ = [[] for _ in range(n_bootstraps)]
+F1_oob = [[] for _ in range(n_bootstraps)]
+
+for bs in range(n_bootstraps):
+    current_FC = []
+    current_PC = []
+    current_PQ = []
+    current_F1_oob = []
+
+    oobs_sample = oobs[bs]
+
+    # We created a list with all the indexes of the products that are in the sample:
+    selected_products = []
+    for product in oobs_sample:
+        selected_products.append(product[0])
+    selected_products = list(set(sorted(selected_products)))
+
+    n_total_comparisons = (len(selected_products)*(len(selected_products)-1))/2
+
+    # Calculate the number of real duplicates in the sample:
+    n_real_duplicates = 0
+    duplicates_here = [0]
+    for pair in duplicate_pairs:
+        if pair[0] in selected_products and pair[1] in selected_products:
+            n_real_duplicates += 1
+            duplicates_here.append(pair)
+
+    threshold_vector = TH[bs]
+
+    for threshold, n_bands in zip(threshold_vector, range(1, n_rows_signature + 1)):
+        if n_rows_signature % n_bands == 0:  # This ensures b divides total_rows evenly
+            n_band_rows = n_rows_signature // n_bands  # Calculates the corresponding r value
+            print(f"Bootstrap {bs + 1}, Testing combination: n_bands = {n_bands}, n_band_rows = {n_band_rows}")
+
+            candidates = LSH_function(n_bands, n_band_rows, selected_products)
+            unique_candidates = unique_pairs_function(candidates)
+            n_candidate_comparisons = len(unique_pairs_function(candidates))
+
+            jaccard_candidates = perform_jaccard_similarity(unique_candidates, threshold)
+            F1_oob_value = calculate_f1_score(duplicates_here, jaccard_candidates, threshold)
+
+            true_positives = 0
+            for pair in unique_candidates:
+                # Check if the pair is in real_duplicates
+                if pair in duplicate_pairs:
+                    true_positives += 1
+
+            current_PC.append(true_positives / n_real_duplicates)
+            current_PQ.append(true_positives / n_candidate_comparisons)
+            current_FC.append(n_candidate_comparisons / n_total_comparisons)
+            current_F1_oob.append(F1_oob_value)
+
+    PC[bs] = current_PC
+    PQ[bs] = current_PQ
+    FC[bs] = current_FC
+    F1_oob[bs] = current_F1_oob
+
+
+FC_sum = [sum(FC) for FC in zip(FC[0], FC[1], FC[2], FC[3], FC[4])]
+FC_average = [FC/5 for FC in FC_sum]
+
+PC_sum = [sum(x) for x in zip(PC[0], PC[1], PC[2], PC[3], PC[4])]
+PC_average = [x/5 for x in PC_sum]
+
+PQ_sum = [sum(x) for x in zip(PQ[0], PQ[1], PQ[2], PQ[3], PQ[4])]
+PQ_average = [x/5 for x in PQ_sum]
+
+F1_oob = [sum(x) for x in zip(F1_oob[0], F1_oob[1], F1_oob[2], F1_oob[3], F1_oob[4])]
+F1_average = [x/5 for x in F1_oob]
+
+max(F1_average)
+
+
+plt.figure(figsize=(10, 6))
+plt.plot(FC_average, PC_average, linestyle='-', color='black', label='PC vs. Fraction of Comparisons')
+plt.xlabel('Fraction of Comparisons')
+plt.ylabel('PC')
+plt.legend()
+plt.show()
+
+plt.figure(figsize=(10, 6))
+plt.plot(FC_average, PQ_average, linestyle='-', color='black', label='PQ vs. Fraction of Comparisons')
+plt.xlabel('Fraction of Comparisons')
+plt.ylabel('PQ')
+plt.legend()
+plt.show()
+
+plt.figure(figsize=(10, 6))
+plt.plot(FC_average, F1_average, linestyle='-', color='black', label='F1 vs. Fraction of Comparisons')
+plt.xlabel('Fraction of Comparisons')
+plt.ylabel('F1')
+plt.legend()
+plt.show()
